@@ -54,6 +54,17 @@ def get_hfi_returns():
     return hfi
 
 
+def get_ind_returns():
+    """
+    Load and format the Ken French 30 Industry Portfolios 
+    Value Weighted Monthly Returns
+    """
+    ind = pd.read_csv("../data/ind30_m_vw_rets.csv", header=0, index_col=0)/100
+    ind.index = pd.to_datetime(ind.index, format="%Y%m").to_period("M")
+    ind.columns = ind.columns.str.strip().str.lower()
+    return ind
+
+
 def semideviation(r):
     """
     Returns the semideviation aka negative semideviation of r
@@ -112,6 +123,18 @@ def var_historic(r, level=5):
     else:
         raise TypeError("Expected r to be Series or DataFrame")
         
+
+def cvar_historic(r, level=5):
+    """
+    Computes the Conditional VaR of Series or DataFrame
+    """
+    if isinstance(r, pd.Series):
+        is_beyond = r <= -var_historic(r, level=level)
+        return -r[is_beyond].mean()
+    elif isinstance(r, pd.DataFrame):
+        return r.aggregate(cvar_historic, level=level)
+    else:
+        raise TypeError("Expected r to be a Series or DataFrame")
         
 from scipy.stats import norm
 
@@ -133,3 +156,33 @@ def var_gaussian(r, level=5, modified=False):
                 (2*z**3 - 5*z) * (s**2)/36)
         
     return -(r.mean() + z * r.std(ddof=0))
+
+
+def annualize_rets(r, periods_per_year):
+    """
+    Annualize a set of returns
+    TODO: We should infer the periods per year
+    """
+    compounded_growth = (1+r).prod()
+    n_periods = r.shape[0]
+    return compounded_growth**(periods_per_year/n_periods)-1
+
+
+def annualize_vol(r, periods_per_year):
+    """
+    Annualizes the volatility of a set of returns
+    TODO: We should infer the periods per year
+    """
+    return r.std()*(periods_per_year**0.5)
+
+
+def sharpe_ratio(r, riskfree_rate, periods_per_year):
+    """
+    Computes the annual riskfree rate to per period
+    """
+    # convert the annual riskfree rate to per period
+    rf_per_period = (1+riskfree_rate)**(1/periods_per_year)-1
+    excess_ret = r- rf_per_period
+    ann_ex_ret = annualize_rets(excess_ret, periods_per_year)
+    ann_vol = annualize_vol(r, periods_per_year)
+    return ann_ex_ret/ann_vol
