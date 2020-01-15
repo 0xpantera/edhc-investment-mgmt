@@ -258,7 +258,7 @@ def optimal_weights(n_points, er, cov):
     return weights
 
 
-def plot_ef(n_points, er, cov, style=".-"):
+def plot_ef(n_points, er, cov, style=".-", show_cml=False, riskfree_rate=0):
     """
     Plots the N-asset efficient frontier
     """
@@ -269,4 +269,51 @@ def plot_ef(n_points, er, cov, style=".-"):
         "Returns": rets,
         "Volatility": vols
     })
-    return ef.plot.line(x="Volatility", y="Returns", style=style)
+    ax = ef.plot.line(x="Volatility", y="Returns", style=style)
+    if show_cml:
+        ax.set_xlim(left=0)
+        w_msr = msr(riskfree_rate, er, cov)
+        r_msr = portfolio_return(w_msr, er)
+        vol_msr = portfolio_vol(w_msr, cov)
+        # Add CML
+        cml_x = [0, vol_msr]
+        cml_y = [riskfree_rate, r_msr]
+        ax.plot(cml_x, cml_y, color="green",
+                marker="o", linestyle="dashed",
+                markersize=12, linewidth=2)
+    
+    return ax
+
+
+def msr(riskfree_rate, er, cov):
+    """
+    Returns the weights of the portfolio that gives you the maximum sharpe ratio
+    given the riskfree rate and expected returns and a covariance matrix
+    """
+    # Number of assets
+    n = er.shape[0]
+    init_guess = np.repeat(1/n, n)
+    # Constraints
+    # Weight bounds: minimum of 0 and maximum of 100%
+    bounds = ((0.0, 1.0),)*n
+    # Weights sum to 1
+    weights_sum_to_1 = {
+        "type": "eq",
+        "fun": lambda weights: np.sum(weights) - 1
+    }
+    
+    def neg_sharpe_ratio(weights, riskfree_rate, er, cov):
+        """
+        Returns the negative of the sharpe ratio, given weights
+        """
+        r = portfolio_return(weights, er)
+        vol = portfolio_vol(weights, cov)
+        return -(r - riskfree_rate)/vol
+    
+    # Maximize sharpe ratio
+    results = minimize(neg_sharpe_ratio, init_guess,
+                       args=(riskfree_rate, er, cov), method="SLSQP",
+                       options={"disp": False},
+                       constraints=(weights_sum_to_1),
+                       bounds=bounds)
+    return results.x
