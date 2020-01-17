@@ -31,7 +31,7 @@ def get_ffme_returns():
     """
     Load and format the Fama-French Dataset for the returns of the Top and Bottom Deciles by MarketCap
     """
-    me_m = pd.read_csv("data/Portfolios_Formed_on_ME_monthly_EW.csv",
+    me_m = pd.read_csv("../data/Portfolios_Formed_on_ME_monthly_EW.csv",
                         header=0, index_col=0, na_values=-99.99)
     rets = me_m[["Lo 10", "Hi 10"]]
     rets.columns = ["small_cap", "large_cap"]
@@ -45,7 +45,7 @@ def get_hfi_returns():
     """
     Load and format the EDHEC Hege Fund Index Returns
     """
-    hfi = pd.read_csv("data/edhec-hedgefundindices.csv",
+    hfi = pd.read_csv("../data/edhec-hedgefundindices.csv",
                       header=0, index_col=0, parse_dates=True)
     
     hfi = hfi/100
@@ -258,7 +258,9 @@ def optimal_weights(n_points, er, cov):
     return weights
 
 
-def plot_ef(n_points, er, cov, style=".-", show_cml=False, riskfree_rate=0):
+def plot_ef(n_points, er, cov, style=".-", 
+            show_cml=False, riskfree_rate=0, 
+            show_ew=False, show_gmv=False):
     """
     Plots the N-asset efficient frontier
     """
@@ -270,6 +272,21 @@ def plot_ef(n_points, er, cov, style=".-", show_cml=False, riskfree_rate=0):
         "Volatility": vols
     })
     ax = ef.plot.line(x="Volatility", y="Returns", style=style)
+    if show_gmv:
+        w_gmv = gmv(cov)
+        r_gmv = portfolio_return(w_gmv, er)
+        vol_gmv = portfolio_vol(w_gmv, cov)
+        # display GMV
+        ax.plot([vol_gmv], [r_gmv], color="midnightblue", marker="o", markersize=10)
+        
+    if show_ew:
+        n = er.shape[0]
+        w_ew = np.repeat(1/n, n)
+        r_ew = portfolio_return(w_ew, er)
+        vol_ew = portfolio_vol(w_ew, cov)
+        # display EW
+        ax.plot([vol_ew], [r_ew], color="goldenrod", marker="o", markersize=10)
+        
     if show_cml:
         ax.set_xlim(left=0)
         w_msr = msr(riskfree_rate, er, cov)
@@ -283,6 +300,15 @@ def plot_ef(n_points, er, cov, style=".-", show_cml=False, riskfree_rate=0):
                 markersize=12, linewidth=2)
     
     return ax
+
+
+def gmv(cov):
+    """
+    Returns the weights of the Global Minimum Vol portfolio
+    give the covariance matrix
+    """
+    n = cov.shape[0]
+    return msr(0, np.repeat(1,n), cov)
 
 
 def msr(riskfree_rate, er, cov):
