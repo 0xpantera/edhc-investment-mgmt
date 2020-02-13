@@ -481,21 +481,27 @@ def gbm(n_years=10, n_scenarios=1000, mu=0.07, sigma=0.15, steps_per_year=12, s_
 
 def discount(t, r):
     """
-    Compute the price of a pure discount bond that pays a dollar at time t,
-    given interest rate r
+    Compute the price of a pure discount bond
+    that pays a dollar at time period t
+    where r is the per-period interest rate.
+    Return a |t| x |r| Series or DataFrame indexed by t
+    r can be a float, Series or DataFrame
     """
-    return 1/(1+r)**t
+    discounts = pd.DataFrame([(r+1)**-i for i in t])
+    discounts.index = t
+    return discounts
 
 
-def pv(l, r):
+def pv(flows, r):
     """
-    Compute the present value of a sequence of liabilities
-    l is indexed by the time and the values are the amounts of each liability
-    returns the present value of the sequence
+    Compute the present value of a sequence of cash flows given by
+    the time (as an index) and amounts
+    r can be a scalar, Series or DataFrame with the number of rows
+    matching the num of rows in flows
     """
-    dates = l.index
+    dates = flows.index
     discounts = discount(dates, r)
-    return (discounts*l).sum()
+    return discounts.multiply(flows, axis='rows').sum()
 
 
 def funding_ratio(assets, liabilities, r):
@@ -506,6 +512,19 @@ def funding_ratio(assets, liabilities, r):
 
 
 import math
+
+def inst_to_ann(r):
+    """
+    Converts short rate to an annualized rate
+    """
+    return np.expm1(r)
+
+
+def ann_to_inst(r):
+    """
+    Converts annualized rate to short rate
+    """
+    return np.log1p(r)
 
 def cir(n_years=10, n_scenarios=1, a=0.05, b=0.03, sigma=0.05, steps_per_year=12, r_0=None):
     """
@@ -555,6 +574,7 @@ def bond_cash_flows(maturity, principal=100, coupon_rate=0.03, coupons_per_year=
     """
     n_coupons = round(maturity*coupons_per_year)
     coupon_amt = principal*coupon_rate/coupons_per_year
+    coupons = np.repeat(coupon_amt, n_coupons)
     coupon_times = np.arange(1, n_coupons+1)
     cash_flows = pd.Series(data=coupon_amt, index=coupon_times)
     cash_flows.iloc[-1] += principal
@@ -563,20 +583,52 @@ def bond_cash_flows(maturity, principal=100, coupon_rate=0.03, coupons_per_year=
 
 def bond_price(maturity, principal=100, coupon_rate=0.03, coupons_per_year=12, discount_rate=0.03):
     """
-    Price a bond based on bond parameters maturity, principal, coupon rate and coupons per year
-    and the prevailing discount rate
+    Computes the price of a bond that pays regular coupons until maturity
+    at which time the principal and the final coupon is returned.
+    This is not designed to be efficient, rather, it is to illustrate the
+    underlying principle behind bond pricing.
+    If discount_rate is a DataFrame, then this is assumed to be the rate on each
+    coupon date and the bond value is computed over time.
+    i.e. The index of the discount_rate DataFrame is assumed to be the coupon number
     """
-    cash_flows = bond_cash_flows(maturity, principal, coupon_rate, coupons_per_year)
-    return pv(cash_flows, discount_rate/coupons_per_year)
+    if isinstance(discount_rate, pd.DataFrame):
+        pricing_dates = discount_rate.index
+        prices = pd.DataFrame(index=pricing_dates, columns=discount_rate.columns)
+        for t in pricing_dates:
+            prices.loc[t] = bond_price(maturity-t/coupons_per_year, principal,
+                                       coupon_rate, coupons_per_year,
+                                       discount_rate.loc[t])
+        return prices
+    
+    else: # base case = single time period
+        if maturity <= 0: return principal+principal*coupon_rate/coupons_per_year
+        cash_flows = bond_cash_flows(maturity, principal, coupon_rate, coupons_per_year)
+        return pv(cash_flows, discount_rate/coupons_per_year)
+    
+    
+def bond_total_return(monthly_prices, principal, coupon_rate, coupons_per_year):
+    """
+    Computes the total return of a bond based on monthly bond prices and coupon payments
+    Assumes that dividends (coupons) are paid out at the end of the period
+    (e.g. end of 3 months for quarterly div) and that dividens are reinvested in the bond
+    """
+    coupons = pd.DataFrame(data = 0, index=monthly_prices.index,
+                           columns=monthly_prices.columns)
+    t_max = monthly_prices.index.max()
+    pay_date = np.linspace(12/coupons_per_year, t_max,
+                           int(coupons_per_year*t_max/12), dtype=int)
+    coupons.iloc[pay_date] = principal*coupon_rate/coupons_per_year
+    total_returns = (monthly_prices + coupons)/monthly_prices.shift()-1
+    return total_returns.dropna()
 
 
 def macaulay_duration(flows, discount_rate):
     """
     Computes the Macaulay Duration of a sequence of cash flows
     """
-    discounted_flows = discount(flows.index, discount_rate)*flows
+    discounted_flows = discount(flows.index, discount_rate)*pd.DataFrame(flows)
     weights = discounted_flows/discounted_flows.sum()
-    return np.average(flows.index, weights=weights)
+    return np.average(flows.index, weights=weights.iloc[:,0])
 
 
 def match_durations(cf_t, cf_s, cf_l, discount_rate):
@@ -588,3 +640,135 @@ def match_durations(cf_t, cf_s, cf_l, discount_rate):
     d_s = macaulay_duration(cf_s, discount_rate)
     d_l = macaulay_duration(cf_l, discount_rate)
     return (d_l - d_t)/(d_l - d_s)
+
+
+def bt_mix(r1, r2, allocator, **kwargs):
+    """
+    Runs a backtest of allocating between two sets of returns
+    r1 and r2 are TxN DataFrames of returns where T is the time step index and 
+    N is the number of scenarios.
+    allocator is a function that takes two sets of returns and allocator specific params and
+    produces an allocation to the first portfolio (the rest of the money is invested in the GHP)
+    as a Tx1 DataFrame.
+    Returns a TxN DataFrame of the resulting N portfolio scenarios
+    """
+    if not r1.shape == r2.shape:
+        raise ValueError("r1 and r2 need to be the same shape")
+    
+    weights = allocator(r1, r2, **kwargs)
+    
+    if not weights.shape == r1.shape:
+        raise ValueError("Allocator returned weights that don't match r1")
+        
+    r_mix = weights*r1 + (1-weights)*r2
+    return r_mix
+
+
+def fixed_mix_allocator(r1, r2, w1, **kwargs):
+    """
+    Produces a time series over T steps of allocations between the PSP and GHP across N scenarios
+    PSP and GHP are TxN DataFrames that represent the returns of the PSP and GHP such that:
+      each column is a scenario
+      each row is the price for a timestep
+    Returns a TxN DataFrame of PSP weights
+    """
+    return pd.DataFrame(data=w1, index=r1.index, columns=r1.columns)
+
+
+def terminal_values(rets):
+    """
+    Returns the final values of a dollar at the end of the return period for each scenario
+    """
+    return (rets+1).prod()
+
+
+def terminal_stats(rets, floor=0.8, cap=np.inf, name="stats"):
+    """
+    Produce summary statistics on the terminal values per invested dollar
+    across a range of N scenarios
+    rets is a TxN DataFrame of returns, where T is the time-step (assume rets is sorted by time)
+    Returns a 1 column DataFrame of summary stats indexed by the stat name
+    """
+    terminal_wealth = (rets+1).prod()
+    breach = terminal_wealth < floor
+    reach = terminal_wealth >= cap
+    p_breach = breach.mean() if breach.sum() > 0 else np.nan
+    p_reach = breach.mean() if reach.sum() > 0 else np.nan
+    e_short = (floor-terminal_wealth[breach]).mean() if breach.sum() > 0 else np.nan
+    e_surplus = (cap-terminal_wealth[reach]).mean() if reach.sum() > 0 else np.nan
+    sum_stats = pd.DataFrame.from_dict({
+        "mean": terminal_wealth.mean(),
+        "std": terminal_wealth.std(),
+        "p_breach": p_breach,
+        "e_short": e_short,
+        "p_reach": p_reach,
+        "e_surplus": e_surplus
+    }, orient="index", columns=[name])
+    return sum_stats
+
+
+def glide_path_allocator(r1, r2, start_glide=1, end_glide=0):
+    """
+    Simulates a target-date-fund style gradual move from r1 to r2
+    """
+    n_points = r1.shape[0]
+    n_col = r1.shape[1]
+    path = pd.Series(data=np.linspace(start_glide, end_glide, num=n_points))
+    paths = pd.concat([path]*n_col, axis="columns")
+    paths.index = r1.index
+    paths.columns = r1.columns
+    return paths
+
+
+def floor_allocator(psp_r, ghp_r, floor, zc_prices, m=3):
+    """
+    Allocate between PSP and GHP with the goal to provide exposure to the upside
+    of the PSP without going violating the floor.
+    Uses a CPPI-style dynamic risk budgeting algorithm by investing a multiple
+    of the cushion in the PSP
+    Returns a DataFrame with the same shape as the psp/ghp representing the weights in the PSP
+    """
+    if zc_prices.shape != psp_r.shape:
+        raise ValueError("PSP and ZC Prices must have the same shape")
+    n_steps, n_scenarios = psp_r.shape
+    account_value = np.repeat(1, n_scenarios)
+    floor_value = np.repeat(1, n_scenarios)
+    w_history = pd.DataFrame(index=psp_r.index, columns=psp_r.columns)
+    for step in range(n_steps):
+        floor_value = floor*zc_prices.iloc[step] ## PV of Floor assuming today's rates and flat YC
+        cushion = (account_value - floor_value)/account_value
+        psp_w = (m*cushion).clip(0, 1) # same as applying min and max
+        ghp_w = 1-psp_w
+        psp_alloc = account_value*psp_w
+        ghp_alloc = account_value*ghp_w
+        # recompute the new account value at the end of this step
+        account_value = psp_alloc*(1+psp_r.iloc[step]) + ghp_alloc*(1+ghp_r.iloc[step])
+        w_history.iloc[step] = psp_w
+    return w_history
+
+
+def drawdown_allocator(psp_r, ghp_r, maxdd, m=3):
+    """
+    Allocate between PSP and GHP with the goal to provide exposure to the upside
+    of the PSP without going violating the floor.
+    Uses a CPPI-style dynamic risk budgeting algorithm by investing a multiple
+    of the cushion in the PSP
+    Returns a DataFrame with the same shape as the psp/ghp representing the weights in the PSP
+    """
+    n_steps, n_scenarios = psp_r.shape
+    account_value = np.repeat(1, n_scenarios)
+    floor_value = np.repeat(1, n_scenarios)
+    peak_value = np.repeat(1, n_scenarios)
+    w_history = pd.DataFrame(index=psp_r.index, columns=psp_r.columns)
+    for step in range(n_steps):
+        floor_value = (1-maxdd)*peak_value ### Floor is based on Prev Peak
+        cushion = (account_value - floor_value)/account_value
+        psp_w = (m*cushion).clip(0, 1) # same as applying min and max
+        ghp_w = 1-psp_w
+        psp_alloc = account_value*psp_w
+        ghp_alloc = account_value*ghp_w
+        # recompute the new account value and prev peak at the end of this step
+        account_value = psp_alloc*(1+psp_r.iloc[step]) + ghp_alloc*(1+ghp_r.iloc[step])
+        peak_value = np.maximum(peak_value, account_value)
+        w_history.iloc[step] = psp_w
+    return w_history
